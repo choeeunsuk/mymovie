@@ -1,5 +1,6 @@
 import calendar
 from datetime import datetime, timedelta
+import re
 import urllib.parse
 from zoneinfo import ZoneInfo
 
@@ -144,18 +145,17 @@ df["movieNm_display"] = df.apply(add_trophy, axis=1)
 
 
 # -------------------------------------------------------------------
-# 2. 1위 영화 대표 이미지 및 트레일러 URL 추출 함수
+# 2. 영화 변경 시 자동으로 유튜브 예고편 실시간 자동 검색 함수
 # -------------------------------------------------------------------
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def fetch_movie_media(movie_name):
-    """TMDB API 또는 YouTube Data API를 통해 이미지 및 트레일러 URL을 가져옵니다."""
     poster_url = None
     trailer_url = None
 
     tmdb_key = st.secrets.get("TMDB_KEY", None)
     yt_key = st.secrets.get("YOUTUBE_KEY", None)
 
-    # 1. TMDB 조회
+    # 1단계: TMDB API 사용
     if tmdb_key:
         try:
             s_url = "https://api.themoviedb.org/3/search/movie"
@@ -166,7 +166,7 @@ def fetch_movie_media(movie_name):
                     "query": movie_name,
                     "language": "ko-KR",
                 },
-                timeout=5,
+                timeout=3,
             )
             if r.status_code == 200:
                 results = r.json().get("results", [])
@@ -181,7 +181,7 @@ def fetch_movie_media(movie_name):
                     vr = requests.get(
                         v_url,
                         params={"api_key": tmdb_key, "language": "ko-KR"},
-                        timeout=5,
+                        timeout=3,
                     )
                     if vr.status_code == 200:
                         v_list = vr.json().get("results", [])
@@ -192,7 +192,7 @@ def fetch_movie_media(movie_name):
         except Exception:
             pass
 
-    # 2. YouTube Data API fallback (트레일러 URL이 없는 경우)
+    # 2단계: YouTube Data API 사용
     if not trailer_url and yt_key:
         try:
             yt_search_url = "https://www.googleapis.com/youtube/v3/search"
@@ -205,7 +205,7 @@ def fetch_movie_media(movie_name):
                     "type": "video",
                     "maxResults": 1,
                 },
-                timeout=5,
+                timeout=3,
             )
             if r.status_code == 200:
                 items = r.json().get("items", [])
@@ -215,9 +215,24 @@ def fetch_movie_media(movie_name):
         except Exception:
             pass
 
-    # 하드코딩 예시 보정 (특정 인기 작품 예시)
-    if not trailer_url and "스파이더맨" in movie_name:
-        trailer_url = "https://www.youtube.com/watch?v=dosbhD_1LIo"
+    # 3단계: API 키 없을 때 유튜브 웹 실시간 라이트 검색 (크롤링 폴백)
+    if not trailer_url:
+        try:
+            query = urllib.parse.quote(f"{movie_name} 예고편")
+            search_url = f"https://www.youtube.com/results?search_query={query}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+            }
+            res = requests.get(search_url, headers=headers, timeout=4)
+            if res.status_code == 200:
+                # 유튜브 검색 결과 HTML에서 videoId 파싱
+                video_ids = re.findall(r"\"videoId\":\"([^\"]+)\"", res.text)
+                if video_ids:
+                    trailer_url = (
+                        f"https://www.youtube.com/watch?v={video_ids[0]}"
+                    )
+        except Exception:
+            pass
 
     return poster_url, trailer_url
 
@@ -229,10 +244,10 @@ top = df.sort_values("rank").iloc[0]
 top_movie_name = top["movieNm"]
 open_dt = top["openDt"]
 
+# 영화가 바뀌면 실시간으로 포스터 및 예고편 URL을 자동 조회
 poster_url, trailer_url = fetch_movie_media(top_movie_name)
 yt_search_link = f"https://www.youtube.com/results?search_query={urllib.parse.quote(top_movie_name + ' 예고편')}"
 
-# [비율 조정] 포스터 : 상세정보 : 트레일러 = 1 : 1.2 : 1.8
 col_poster, col_info, col_trailer = st.columns([1, 1.2, 1.8])
 
 with col_poster:
@@ -276,20 +291,20 @@ with col_info:
 with col_trailer:
     st.markdown("#### 🍿 메인 예고편 (Trailer)")
     if trailer_url:
-        # 유튜브 URL을 직접 연결하여 플레이어 정상 작동
+        # 실시간 자동 추출된 유튜브 예고편 플레이어 출력
         st.video(trailer_url)
     else:
-        st.info("💡 아래 버튼을 눌러 유튜브에서 예고편을 바로 감상하실 수 있습니다.")
+        st.info("💡 아래 버튼을 클릭하여 유튜브 검색 결과를 확인하세요.")
 
     st.link_button(
-        f"🔍 YouTube에서 '{top_movie_name}' 예고편 검색하기",
+        f"🔍 YouTube에서 '{top_movie_name}' 예고편 직접 보기",
         yt_search_link,
         use_container_width=True,
     )
 
 
 # -------------------------------------------------------------------
-# 3. 관객수 TOP 5 하이라이트 & TOP 10 데이터프레임
+# 3. 관객수 TOP 5 하이라이트 & 상세 표
 # -------------------------------------------------------------------
 st.markdown("---")
 st.subheader("🔥 관객수 TOP 5 하이라이트")
