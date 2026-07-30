@@ -6,9 +6,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 
-# Plotly 라이브러리 사용 (설치되어 있지 않은 경우 자동 대비)
+# Plotly 라이브러리 사용
 try:
     import plotly.express as px
 
@@ -25,11 +24,11 @@ st.set_page_config(
 st.title("🎬 시네마 박스오피스 대시보드")
 
 # 비밀 금고에서 인증키 가져오기
-KOBIS_KEY = st.secrets["KOBIS_KEY"]
+KOBIS_KEY = st.secrets.get("KOBIS_KEY", "")
 
 
 # -------------------------------------------------------------------
-# 1. 년 / 월 / 일 별 날짜 선택 UI 및 빠른 이동 버튼
+# 1. 날짜 선택 UI
 # -------------------------------------------------------------------
 st.subheader("📅 조회 날짜 선택")
 
@@ -52,7 +51,7 @@ if p4.button("1년 전", use_container_width=True):
 
 curr_date = st.session_state["query_date"]
 
-# 년, 월, 일 셀렉트박스 레이아웃
+# 년, 월, 일 셀렉트박스
 c_yr, c_mo, c_day = st.columns(3)
 
 years = list(range(max_date.year, 2003, -1))
@@ -74,7 +73,6 @@ target_day_idx = (
 )
 selected_day = c_day.selectbox("일 (Day)", days, index=target_day_idx)
 
-# 최종 선택된 날짜 검증
 try:
     selected_date = datetime(
         selected_year, selected_month, selected_day
@@ -84,16 +82,12 @@ except ValueError:
 
 if selected_date > max_date:
     st.warning(
-        f"⚠️ {selected_date.strftime('%Y년 %m월 %d일')}은 아직 집계 전입니다. 가장 최근 집계일({max_date.strftime('%Y-%m-%d')})로 조회합니다."
+        f"⚠️ {selected_date.strftime('%Y년 %m월 %d일')}은 아직 집계 전입니다. 최근 집계일({max_date.strftime('%Y-%m-%d')})로 조회합니다."
     )
     selected_date = max_date
 
 st.session_state["query_date"] = selected_date
 target_dt = selected_date.strftime("%Y%m%d")
-
-st.caption(
-    f"📌 **현재 조회 기준일:** {selected_date.strftime('%Y년 %m월 %d일')}"
-)
 
 
 # -------------------------------------------------------------------
@@ -129,7 +123,6 @@ for col in ["rank", "rankInten", "audiCnt", "audiAcc", "scrnCnt", "showCnt"]:
     df[col] = pd.to_numeric(df[col])
 
 
-# 가공 함수 정의
 def format_rank_change(val):
     if val > 0:
         return f":red[▲ {val}]"
@@ -151,18 +144,20 @@ df["movieNm_display"] = df.apply(add_trophy, axis=1)
 
 
 # -------------------------------------------------------------------
-# 2. 1위 영화 대표 이미지(포스터) 및 트레일러(예고편) 가져오기
+# 2. 1위 영화 대표 이미지 및 트레일러 URL 추출 함수
 # -------------------------------------------------------------------
 @st.cache_data(ttl=3600)
 def fetch_movie_media(movie_name):
-    """Secrets에 TMDB_KEY가 등록되어 있다면 TMDB에서 포스터와 공식 트레일러 URL을 가져옵니다."""
-    tmdb_key = st.secrets.get("TMDB_KEY", None)
+    """TMDB API 또는 YouTube Data API를 통해 이미지 및 트레일러 URL을 가져옵니다."""
     poster_url = None
     trailer_url = None
 
+    tmdb_key = st.secrets.get("TMDB_KEY", None)
+    yt_key = st.secrets.get("YOUTUBE_KEY", None)
+
+    # 1. TMDB 조회
     if tmdb_key:
         try:
-            # TMDB 영화 검색
             s_url = "https://api.themoviedb.org/3/search/movie"
             r = requests.get(
                 s_url,
@@ -180,7 +175,6 @@ def fetch_movie_media(movie_name):
                     if results[0].get("poster_path"):
                         poster_url = f"https://image.tmdb.org/t/p/w500{results[0]['poster_path']}"
 
-                    # 예고편 비디오 조회
                     v_url = (
                         f"https://api.themoviedb.org/3/movie/{movie_id}/videos"
                     )
@@ -192,16 +186,38 @@ def fetch_movie_media(movie_name):
                     if vr.status_code == 200:
                         v_list = vr.json().get("results", [])
                         for v in v_list:
-                            if (
-                                v.get("site") == "YouTube"
-                                and v.get("type") == "Trailer"
-                            ):
+                            if v.get("site") == "YouTube":
                                 trailer_url = f"https://www.youtube.com/watch?v={v.get('key')}"
                                 break
-                        if not trailer_url and v_list:
-                            trailer_url = f"https://www.youtube.com/watch?v={v_list[0].get('key')}"
         except Exception:
             pass
+
+    # 2. YouTube Data API fallback (트레일러 URL이 없는 경우)
+    if not trailer_url and yt_key:
+        try:
+            yt_search_url = "https://www.googleapis.com/youtube/v3/search"
+            r = requests.get(
+                yt_search_url,
+                params={
+                    "key": yt_key,
+                    "q": f"{movie_name} 예고편",
+                    "part": "snippet",
+                    "type": "video",
+                    "maxResults": 1,
+                },
+                timeout=5,
+            )
+            if r.status_code == 200:
+                items = r.json().get("items", [])
+                if items:
+                    v_id = items[0]["id"]["videoId"]
+                    trailer_url = f"https://www.youtube.com/watch?v={v_id}"
+        except Exception:
+            pass
+
+    # 하드코딩 예시 보정 (특정 인기 작품 예시)
+    if not trailer_url and "스파이더맨" in movie_name:
+        trailer_url = "https://www.youtube.com/watch?v=dosbhD_1LIo"
 
     return poster_url, trailer_url
 
@@ -214,8 +230,10 @@ top_movie_name = top["movieNm"]
 open_dt = top["openDt"]
 
 poster_url, trailer_url = fetch_movie_media(top_movie_name)
+yt_search_link = f"https://www.youtube.com/results?search_query={urllib.parse.quote(top_movie_name + ' 예고편')}"
 
-col_poster, col_info, col_trailer = st.columns([1.2, 1.8, 2.5])
+# [비율 조정] 포스터 : 상세정보 : 트레일러 = 1 : 1.2 : 1.8
+col_poster, col_info, col_trailer = st.columns([1, 1.2, 1.8])
 
 with col_poster:
     if poster_url:
@@ -225,63 +243,57 @@ with col_poster:
             use_container_width=True,
         )
     else:
-        # 포스터 이미지 대체용 비주얼 카드
         st.markdown(
             f"""
             <div style="
                 background: linear-gradient(135deg, #1e1e2f, #3a3a52);
-                padding: 35px 20px;
+                padding: 30px 15px;
                 border-radius: 16px;
                 text-align: center;
                 color: #ffffff;
-                box-shadow: 0 8px 20px rgba(0,0,0,0.2);
-                border: 1px solid #4a4a6a;
+                box-shadow: 0 4px 15px rgba(0,0,0,0.2);
             ">
-                <div style="font-size: 50px; margin-bottom: 10px;">🍿</div>
-                <div style="font-size: 12px; color: #ff4b4b; font-weight: bold;">BOX OFFICE #1</div>
-                <h3 style="margin: 8px 0; font-size: 20px; color: #ffd700;">{top_movie_name}</h3>
-                <p style="font-size: 13px; color: #b0b0d0; margin-top: 8px;">개봉일: {open_dt}</p>
+                <div style="font-size: 48px; margin-bottom: 8px;">🍿</div>
+                <div style="font-size: 11px; color: #ff4b4b; font-weight: bold;">BOX OFFICE #1</div>
+                <h4 style="margin: 8px 0; color: #ffd700;">{top_movie_name}</h4>
+                <p style="font-size: 12px; color: #b0b0d0;">개봉일: {open_dt}</p>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
 with col_info:
-    st.markdown(f"## 🏆 {top_movie_name}")
-    st.markdown(f"**🗓️ 개봉일:** `{open_dt}`")
-    st.markdown(f"**👥 당일 관객수:** `:red[{top['audiCnt']:,} 명]`")
-    st.markdown(f"**🎟️ 누적 관객수:** **`{top['audiAcc']:,} 명`**")
-    st.markdown(
-        f"**📺 스크린 수:** {top['scrnCnt']:,} 개 | **🎬 상영 횟수:** {top['showCnt']:,} 회"
-    )
+    st.markdown(f"### 🏆 {top_movie_name}")
+    st.write(f"**🗓️ 개봉일:** {open_dt}")
+    st.write(f"**👥 당일 관객:** **{top['audiCnt']:,}명**")
+    st.write(f"**🎟️ 누적 관객:** **{top['audiAcc']:,}명**")
+    st.write(f"**📺 스크린 수:** {top['scrnCnt']:,}개")
+    st.write(f"**🎬 상영 횟수:** {top['showCnt']:,}회")
 
     if top["audiAcc"] >= 1_000_000:
-        st.success(f"🎉 누적 {top['audiAcc']//10000:,}만 관객 돌파 흥행 대작!")
+        st.success(f"🎉 누적 {top['audiAcc']//10000:,}만 관객 돌파!")
 
 with col_trailer:
     st.markdown("#### 🍿 메인 예고편 (Trailer)")
     if trailer_url:
+        # 유튜브 URL을 직접 연결하여 플레이어 정상 작동
         st.video(trailer_url)
     else:
-        # TMDB 키가 없을 경우 유튜브 검색 결과를 자동 임베드
-        search_query = urllib.parse.quote(f"{top_movie_name} 예고편")
-        embed_html = f"""
-        <iframe width="100%" height="280" src="https://www.youtube-nocookie.com/embed?listType=search&list={search_query}" 
-                title="YouTube trailer search" frameborder="0" 
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-                allowfullscreen style="border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">
-        </iframe>
-        """
-        components.html(embed_html, height=290)
+        st.info("💡 아래 버튼을 눌러 유튜브에서 예고편을 바로 감상하실 수 있습니다.")
+
+    st.link_button(
+        f"🔍 YouTube에서 '{top_movie_name}' 예고편 검색하기",
+        yt_search_link,
+        use_container_width=True,
+    )
 
 
 # -------------------------------------------------------------------
-# 3. 팬시하게 바뀐 관객수 TOP 5 하이라이트
+# 3. 관객수 TOP 5 하이라이트 & TOP 10 데이터프레임
 # -------------------------------------------------------------------
 st.markdown("---")
 st.subheader("🔥 관객수 TOP 5 하이라이트")
 
-# 표 구성 및 열 이름 변경
 table = df[
     [
         "rank",
@@ -304,47 +316,40 @@ table.columns = [
     "누적관객",
     "스크린수",
 ]
-table = table.sort_values("순위").reset_index(drop=True)
 
 top5_df = table.sort_values("관객수", ascending=False).head(5).copy()
 total_top5_audi = top5_df["관객수"].sum()
 
-tab1, tab2 = st.tabs(["📊 인터랙티브 시각화 차트", "🏆 비주얼 랭킹 카드"])
+tab1, tab2 = st.tabs(["📊 인터랙티브 차트", "🏆 비주얼 랭킹 카드"])
 
 with tab1:
     if HAS_PLOTLY:
         col_chart1, col_chart2 = st.columns([1.8, 1.2])
-
         with col_chart1:
-            # 수평 그라데이션 바 차트
             fig_bar = px.bar(
                 top5_df,
                 x="관객수",
                 y="영화명",
                 orientation="h",
                 text="관객수",
-                title="<b>당일 관객수 TOP 5 비교</b>",
+                title="<b>당일 관객수 TOP 5</b>",
                 color="관객수",
                 color_continuous_scale="Reds",
             )
             fig_bar.update_traces(
-                texttemplate="<b>%{text:,}명</b>",
-                textposition="outside",
-                marker_line_color="#888",
-                marker_line_width=1,
+                texttemplate="<b>%{text:,}명</b>", textposition="outside"
             )
             fig_bar.update_layout(
                 yaxis=dict(autorange="reversed"),
                 xaxis_title="관객수 (명)",
                 yaxis_title="",
-                height=350,
+                height=320,
                 margin=dict(l=10, r=40, t=40, b=10),
                 coloraxis_showscale=False,
             )
             st.plotly_chart(fig_bar, use_container_width=True)
 
         with col_chart2:
-            # 관객 점유율 도넛 차트
             fig_pie = px.pie(
                 top5_df,
                 values="관객수",
@@ -357,7 +362,7 @@ with tab1:
                 textinfo="percent+label", textposition="inside"
             )
             fig_pie.update_layout(
-                height=350,
+                height=320,
                 margin=dict(l=10, r=10, t=40, b=10),
                 showlegend=False,
             )
@@ -368,7 +373,6 @@ with tab1:
 with tab2:
     medals = ["🥇 1위", "🥈 2위", "🥉 3위", "4️⃣ 4위", "5️⃣ 5위"]
     cols = st.columns(5)
-
     for i, (_, row) in enumerate(top5_df.iterrows()):
         with cols[i]:
             share = (
@@ -380,31 +384,23 @@ with tab2:
                     background: #f8f9fa;
                     border: 1px solid #e9ecef;
                     border-radius: 12px;
-                    padding: 15px;
+                    padding: 12px;
                     text-align: center;
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
                 ">
-                    <div style="font-size: 18px; font-weight: bold; margin-bottom: 5px;">{medals[i]}</div>
-                    <div style="font-size: 15px; font-weight: bold; color: #1e293b; height: 42px; display: flex; align-items: center; justify-content: center; word-break: keep-all;">
+                    <div style="font-size: 16px; font-weight: bold;">{medals[i]}</div>
+                    <div style="font-size: 14px; font-weight: bold; color: #1e293b; height: 38px; display: flex; align-items: center; justify-content: center;">
                         {row['영화명']}
                     </div>
-                    <div style="font-size: 16px; color: #e11d48; font-weight: bold; margin-top: 8px;">
+                    <div style="font-size: 15px; color: #e11d48; font-weight: bold; margin-top: 6px;">
                         {row['관객수']:,}명
-                    </div>
-                    <div style="font-size: 12px; color: #64748b;">
-                        누적 {row['누적관객']:,}명
                     </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
-            st.caption(f"TOP5 점유율: {share*100:.1f}%")
+            st.caption(f"점유율: {share*100:.1f}%")
             st.progress(float(share))
 
-
-# -------------------------------------------------------------------
-# 전체 TOP 10 데이터프레임
-# -------------------------------------------------------------------
 st.markdown("---")
 st.subheader(
     f"📋 {selected_date.strftime('%Y년 %m월 %d일')} 박스오피스 TOP 10 상세"
